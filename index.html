@@ -1,7 +1,732 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"/></head>
-<body style="background:white;color:black;font-size:30px;padding:40px">
-  Hello! Vercel is working.
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SplitStatement · Enea & Pato</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #0d0c0a; min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-type="module">
+const { useState, useRef, useCallback, useEffect } = React;
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell, LineChart, Line, CartesianGrid } from "recharts";
+
+// ─── Supabase REST client (no SDK needed) ────────────────────────────────────
+const SB_URL = "https://exkkjdwcxwltm.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjE5OTk5OTk5OTl9.iUGqCbBRx6Hbe892rjnBCGxmadeFx2aRm-U_ne4FT-w";
+
+function makeDb(rawUrl, key) {
+  const url = rawUrl.replace(/\/$/, "");
+  const h = {
+    "apikey": key,
+    "Authorization": `Bearer ${key}`,
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+  };
+  const safe = id => encodeURIComponent(id);
+  const req = (path, opts={}) => fetch(`${url}/rest/v1/${path}`, { ...opts, headers: {...h, ...opts.headers} });
+  return {
+    get:     async (room) => { try { const r=await req(`transactions?room_code=eq.${room}&order=created_at.asc`); if(!r.ok){console.error("GET failed",r.status,await r.text());return[];} return r.json(); } catch(e){console.error("GET error",e);return[];} },
+    upsert:  async (rows) => { try { const r=await req("transactions",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(Array.isArray(rows)?rows:[rows])}); if(!r.ok){const t=await r.text();console.error("UPSERT failed",r.status,t);throw new Error(`DB error ${r.status}: ${t}`);}  } catch(e){throw e;} },
+    patch:   async (id, fields) => { try { await req(`transactions?id=eq.${safe(id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify(fields)}); } catch(e){console.error("PATCH error",e);} },
+    del:     async (id)   => { try { await req(`transactions?id=eq.${safe(id)}`,{method:"DELETE"}); } catch(e){console.error("DEL error",e);} },
+    delRoom: async (room) => { try { await req(`transactions?room_code=eq.${room}`,{method:"DELETE"}); } catch(e){console.error("DELROOM error",e);} },
+    test:    async () => { try { const r=await req("transactions?limit=1"); return r.ok; } catch{return false;} },
+  };
+}
+
+const toDb   = (t, room) => ({ id:t.id, room_code:room, date:t.date, description:t.description, amount:t.amount, category:t.category, status:t.status, pato_share:t.patoShare, ai_cat:t.aiCat });
+const fromDb = r => ({ id:r.id, date:r.date||"", description:r.description||"", amount:parseFloat(r.amount)||0, category:r.category||"Other", status:r.status||"shared", patoShare:r.pato_share??50, aiCat:r.ai_cat??false });
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+const CHF   = n => new Intl.NumberFormat("fr-CH",{style:"currency",currency:"CHF"}).format(n??0);
+const CHFs  = n => new Intl.NumberFormat("fr-CH",{maximumFractionDigits:0}).format(n??0);
+const today = () => new Date().toISOString().slice(0,10);
+const uid   = () => Math.random().toString(36).slice(2)+Date.now().toString(36);
+const genCode = () => { const c="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:6},()=>c[Math.floor(Math.random()*c.length)]).join(""); };
+
+function normaliseDate(raw) {
+  if (!raw) return "";
+  const s = raw.trim();
+  const m = s.match(/^(\d{1,2})[.\/\-](\d{1,2})[.\/\-](\d{2,4})$/);
+  if (m) { const y=m[3].length===2?"20"+m[3]:m[3]; return `${y}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`; }
+  if (s.match(/^\d{4}-\d{2}-\d{2}$/)) return s;
+  const d=new Date(s); return isNaN(d)?"":d.toISOString().slice(0,10);
+}
+
+function guessCategory(desc) {
+  const d=(desc||"").toLowerCase();
+  if (/migros|coop|lidl|aldi|spar|manor food|carrefour|denner|volg|epicerie|supermarché|supermarkt/.test(d)) return "Groceries";
+  if (/restaurant|cafe|café|brasserie|pizz|burger|mcdonald|kfc|sushi|kebab|uber.?eat|just.?eat|takeaway|bar |bistro|tavern|delivery/.test(d)) return "Food";
+  if (/cff|sbb|tpg|tl |parking|fuel|esso|shell|bp |total |taxi|uber|blablacar|autoroute|péage|toll|europcar|avis|hertz/.test(d)) return "Transport";
+  if (/netflix|spotify|apple|google play|amazon prime|disney|deezer|adobe|microsoft|dropbox|icloud|swisscom|sunrise|salt |orange |hulu/.test(d)) return "Subscriptions";
+  if (/zara|h&m|mango|uniqlo|pull|zalando|asos|nike|adidas|about.?you|c&a/.test(d)) return "Shopping";
+  if (/amazon|digitec|galaxus|mediamarkt|fnac|interdiscount/.test(d)) return "Shopping";
+  if (/pharmacy|pharmacie|apotheke|doctor|dentist|hospital|clinique|gym|fitness|decathlon|sport/.test(d)) return "Health";
+  if (/hotel|airbnb|booking|expedia|hostel|flight|swiss.?air|easyjet|ryanair|lufthansa/.test(d)) return "Travel";
+  if (/cinema|kino|concert|theatre|théâtre|museum|ticketmaster/.test(d)) return "Entertainment";
+  if (/ikea|hornbach|bauhaus|conforama|jumbo|home24/.test(d)) return "Home";
+  return "Other";
+}
+
+function parseCSVTransactions(text) {
+  const lines=text.trim().split("\n").filter(Boolean); if(lines.length<2) return [];
+  const hi=lines[0].toLowerCase().split(/[,;|\t]/);
+  return lines.slice(1).flatMap(line=>{
+    const cols=line.split(/[,;|\t]/).map(c=>c.trim().replace(/^"|"$/g,""));
+    if(cols.length<2) return [];
+    const di=hi.findIndex(h=>h.includes("date")||h.includes("datum"));
+    const ai=hi.findIndex(h=>h.includes("amount")||h.includes("betrag")||h.includes("montant")||h.includes("debit"));
+    const xi=hi.findIndex(h=>h.includes("desc")||h.includes("merchant")||h.includes("text")||h.includes("libellé")||h.includes("bezeichnung"));
+    const amount=parseFloat((cols[ai>=0?ai:cols.length-1]??"0").replace(/[^0-9.\-]/g,""))||0;
+    const desc=cols[xi>=0?xi:1]??"";
+    if(!amount||!desc) return [];
+    return [{date:normaliseDate(cols[di>=0?di:0]??""),description:desc,amount:Math.abs(amount),category:guessCategory(desc)}];
+  });
+}
+
+function toBase64(file) { return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);}); }
+
+async function extractWithAI(file) {
+  const isCSV=file.type==="text/csv"||file.name.endsWith(".csv")||file.name.endsWith(".txt");
+  if(isCSV){const text=await file.text();return parseCSVTransactions(text);}
+  const b64=await toBase64(file);
+  const year=new Date().getFullYear();
+  const prompt=`Extract ALL expense transactions from this bank/credit card statement (Swiss/European format common).
+Return ONLY a valid JSON array — no markdown, no explanation. Each object:
+{"date":"YYYY-MM-DD","description":"merchant","amount":12.34,"category":"..."}
+
+DATES (critical): Extract the date on each line. Common formats: DD.MM.YYYY, DD/MM/YYYY, DD MMM YYYY.
+Convert ALL dates to YYYY-MM-DD. If year missing use ${year}. Never leave date empty.
+
+CATEGORIES — pick the best match:
+- Food → restaurants, cafes, bars, fast food, delivery apps (Uber Eats etc)
+- Groceries → supermarkets (Migros, Coop, Lidl, Aldi, Manor food hall)
+- Transport → fuel, parking, SBB/CFF, tram, taxi, Uber rides, tolls, car rental
+- Shopping → clothing, shoes, electronics, Amazon, Zalando, online retail
+- Home → furniture, IKEA, hardware stores, household supplies
+- Health → pharmacy, doctor, gym, Decathlon, sport shops
+- Entertainment → cinema, concerts, streaming services, games
+- Subscriptions → recurring digital services, phone bills, insurance
+- Travel → hotels, flights, Airbnb, booking.com
+- Other → only if truly nothing else fits
+
+AMOUNTS: always positive. Skip credits, refunds, card payments, interest charges.
+DESCRIPTION: merchant name only, max 35 chars.`;
+  const content=file.type==="application/pdf"
+    ?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},{type:"text",text:prompt}]
+    :[{type:"image",source:{type:"base64",media_type:file.type,data:b64}},{type:"text",text:prompt}];
+  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:8000,messages:[{role:"user",content}]})});
+  const data=await res.json();
+  const raw=(data.content?.map(c=>c.text||"").join("")??"").replace(/```json|```/g,"").trim();
+  const s=raw.indexOf("["),e=raw.lastIndexOf("]"); if(s===-1) return [];
+  return JSON.parse(raw.slice(s,e+1));
+}
+
+const CATEGORIES=["Food","Groceries","Transport","Shopping","Home","Health","Entertainment","Subscriptions","Travel","Other"];
+const CE={Food:"🍽",Groceries:"🛒",Transport:"🚗",Shopping:"👗",Home:"🏠",Health:"💊",Entertainment:"🎭",Subscriptions:"📱",Travel:"✈️",Other:"•"};
+const CAT_COLORS=["#e8c84a","#4ade80","#60a5fa","#f472b6","#fb923c","#a78bfa","#34d399","#f87171","#38bdf8","#d4d4d4"];
+const BLANK={description:"",amount:"",date:today(),category:"Other",status:"shared",patoShare:50};
+const STORAGE_KEY="splitstatement_config";
+
+// ─── Stats view ───────────────────────────────────────────────────────────────
+function StatsView({txs}) {
+  const shared=txs.filter(t=>t.status==="shared");
+  const monthMap={};
+  shared.forEach(t=>{const m=(t.date||"").slice(0,7);if(!m)return;if(!monthMap[m])monthMap[m]={month:m,total:0,enea:0,pato:0};const p=t.amount*(t.patoShare/100);monthMap[m].total+=t.amount;monthMap[m].pato+=p;monthMap[m].enea+=t.amount-p;});
+  const mData=Object.values(monthMap).sort((a,b)=>a.month.localeCompare(b.month)).map(d=>({...d,label:new Date(d.month+"-01").toLocaleDateString("en-GB",{month:"short",year:"2-digit"}),total:+d.total.toFixed(2),enea:+d.enea.toFixed(2),pato:+d.pato.toFixed(2)}));
+  const catMap={};shared.forEach(t=>{catMap[t.category]=(catMap[t.category]||0)+t.amount;});
+  const cData=Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([name,value],i)=>({name,value:+value.toFixed(2),color:CAT_COLORS[i%CAT_COLORS.length],emoji:CE[name]??"•"}));
+  const cmMap={};shared.forEach(t=>{const m=(t.date||"").slice(0,7);if(!m)return;if(!cmMap[m])cmMap[m]={month:m};cmMap[m][t.category]=(cmMap[m][t.category]||0)+t.amount;});
+  const cmData=Object.values(cmMap).sort((a,b)=>a.month.localeCompare(b.month)).map(d=>({...d,label:new Date(d.month+"-01").toLocaleDateString("en-GB",{month:"short",year:"2-digit"})}));
+  const mMap={};shared.forEach(t=>{if(!mMap[t.description])mMap[t.description]={count:0,total:0};mMap[t.description].count++;mMap[t.description].total+=t.amount;});
+  const topM=Object.entries(mMap).sort((a,b)=>b[1].total-a[1].total).slice(0,8).map(([name,d])=>({name,...d,total:+d.total.toFixed(2)}));
+  const totSh=shared.reduce((s,t)=>s+t.amount,0);
+  const totP=shared.reduce((s,t)=>s+t.amount*(t.patoShare/100),0);
+  const totE=totSh-totP;
+  const tt={background:"#1a1810",border:"1px solid #2a2820",borderRadius:8,padding:"8px 12px",color:"#e0ddd5",fontSize:12};
+  if(!shared.length) return <div style={{textAlign:"center",color:"#4a4838",padding:"60px 20px",fontSize:14}}>No shared transactions yet.</div>;
+  return (
+    <div style={{padding:"14px 14px 60px"}}>
+      <div style={SS.kpiRow}>
+        {[["Total shared",CHF(totSh),""],["Enea pays",CHF(totE),`${totSh>0?(totE/totSh*100).toFixed(0):0}%`],["Pato pays",CHF(totP),`${totSh>0?(totP/totSh*100).toFixed(0):0}%`],["Shared txns",shared.length,""]].map(([l,v,s])=>(
+          <div key={l} style={SS.kpi}><div style={SS.kpiLbl}>{l}</div><div style={SS.kpiVal}>{v}</div>{s&&<div style={SS.kpiSub}>{s}</div>}</div>
+        ))}
+      </div>
+      {mData.length>0&&<div style={SS.chartCard}><div style={SS.chartTitle}>Monthly Shared Spend</div><ResponsiveContainer width="100%" height={200}><BarChart data={mData} margin={{top:4,right:4,left:-10,bottom:0}}><CartesianGrid strokeDasharray="3 3" stroke="#1e1c16"/><XAxis dataKey="label" tick={{fill:"#6a6050",fontSize:10}} axisLine={false} tickLine={false}/><YAxis tick={{fill:"#6a6050",fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>CHFs(v)}/><Tooltip contentStyle={tt} formatter={(v,n)=>[CHF(v),n]}/><Legend wrapperStyle={{fontSize:11,color:"#8a8060"}}/><Bar dataKey="enea" name="Enea" stackId="a" fill="#a78b2f" radius={[0,0,0,0]}/><Bar dataKey="pato" name="Pato" stackId="a" fill="#4ade80" radius={[3,3,0,0]}/></BarChart></ResponsiveContainer></div>}
+      {mData.length>1&&<div style={SS.chartCard}><div style={SS.chartTitle}>Spending Trend</div><ResponsiveContainer width="100%" height={180}><LineChart data={mData} margin={{top:4,right:4,left:-10,bottom:0}}><CartesianGrid strokeDasharray="3 3" stroke="#1e1c16"/><XAxis dataKey="label" tick={{fill:"#6a6050",fontSize:10}} axisLine={false} tickLine={false}/><YAxis tick={{fill:"#6a6050",fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>CHFs(v)}/><Tooltip contentStyle={tt} formatter={v=>[CHF(v),"Total"]}/><Line type="monotone" dataKey="total" stroke="#e8c84a" strokeWidth={2} dot={{fill:"#e8c84a",r:3}} activeDot={{r:5}}/></LineChart></ResponsiveContainer></div>}
+      {cData.length>0&&<div style={SS.chartCard}><div style={SS.chartTitle}>Spend by Category</div><div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}><ResponsiveContainer width={160} height={160}><PieChart><Pie data={cData} dataKey="value" cx="50%" cy="50%" innerRadius={42} outerRadius={72} paddingAngle={2}>{cData.map((c,i)=><Cell key={i} fill={c.color}/>)}</Pie><Tooltip contentStyle={tt} formatter={v=>[CHF(v)]}/></PieChart></ResponsiveContainer><div style={{flex:1,minWidth:140,display:"flex",flexDirection:"column",gap:5}}>{cData.map((c,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:8,height:8,borderRadius:"50%",background:c.color,flexShrink:0}}/><span style={{fontSize:11,color:"#a0a090",flex:1}}>{c.emoji} {c.name}</span><span style={{fontSize:11,fontWeight:700,color:"#c8b870"}}>{CHF(c.value)}</span><span style={{fontSize:10,color:"#4a4838",minWidth:30,textAlign:"right"}}>{totSh>0?(c.value/totSh*100).toFixed(0):0}%</span></div>)}</div></div></div>}
+      {cmData.length>0&&<div style={SS.chartCard}><div style={SS.chartTitle}>Categories by Month</div><ResponsiveContainer width="100%" height={220}><BarChart data={cmData} margin={{top:4,right:4,left:-10,bottom:0}}><CartesianGrid strokeDasharray="3 3" stroke="#1e1c16"/><XAxis dataKey="label" tick={{fill:"#6a6050",fontSize:10}} axisLine={false} tickLine={false}/><YAxis tick={{fill:"#6a6050",fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>CHFs(v)}/><Tooltip contentStyle={tt} formatter={(v,n)=>[CHF(v),n]}/><Legend wrapperStyle={{fontSize:10,color:"#8a8060"}}/>{cData.map((c,i)=><Bar key={c.name} dataKey={c.name} stackId="c" fill={CAT_COLORS[i%CAT_COLORS.length]} radius={i===cData.length-1?[3,3,0,0]:[0,0,0,0]}/>)}</BarChart></ResponsiveContainer></div>}
+      {topM.length>0&&<div style={SS.chartCard}><div style={SS.chartTitle}>Top Merchants</div>{topM.map((m,i)=><div key={i} style={SS.mRow}><span style={SS.mRank}>{i+1}</span><span style={SS.mName}>{m.name}</span><div style={SS.mBarW}><div style={{...SS.mBar,width:`${topM[0].total>0?(m.total/topM[0].total*100):0}%`}}/></div><span style={SS.mAmt}>{CHF(m.total)}</span><span style={SS.mCnt}>{m.count}×</span></div>)}</div>}
+    </div>
+  );
+}
+
+// ─── Main app ─────────────────────────────────────────────────────────────────
+function App() {
+  const [stage,    setStage]   = useState("init"); // init|setup|room|upload|loading|review
+  const [sbUrl,    setSbUrl]   = useState("https://exkkjdwcxwltm.supabase.co");
+  const [sbKey,    setSbKey]   = useState("sb_publishable_BHWEhYeiWQ36d3SR7wR75w_5yQ1T5BG");
+  const [roomCode, setRoomCode]= useState("");
+  const [joinInput,setJoinInput]=useState("");
+  const [txs,      setTxs]     = useState([]);
+  const [fileName, setFileName]= useState("");
+  const [gSplit,   setGSplit]  = useState(50);
+  const [filter,   setFilter]  = useState("all");
+  const [tab,      setTab]     = useState("transactions");
+  const [showForm, setShowForm]= useState(false);
+  const [form,     setForm]    = useState(BLANK);
+  const [editId,   setEditId]  = useState(null);
+  const [catPick,  setCatPick] = useState(null);
+  const [flash,    setFlash]   = useState(null);
+  const [error,    setError]   = useState("");
+  const [drag,     setDrag]    = useState(false);
+  const [syncMsg,  setSyncMsg] = useState(null); // "syncing"|"synced"|null
+  const [connCount,setConnCount]=useState(1); // connected users indicator
+
+  const dbRef      = useRef(null);
+  const lastWrite  = useRef(0);
+  const formRef    = useRef();
+  const fileRef    = useRef();
+
+  const toast = (msg,color="#a78b2f") => { setFlash({msg,color}); setTimeout(()=>setFlash(null),2200); };
+  const db    = () => dbRef.current;
+
+  // ── load saved config ──
+  useEffect(()=>{
+    const u="https://exkkjdwcxwltm.supabase.co";
+    const k="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjE5OTk5OTk5OTl9.iUGqCbBRx6Hbe892rjnBCGxmadeFx2aRm-U_ne4FT-w";
+    dbRef.current=makeDb(u,k);
+    setStage("room");
+  },[]);
+
+  // ── poll Supabase every 3s ──
+  useEffect(()=>{
+    if(stage!=="review"||!roomCode||!db()) return;
+    const poll=async()=>{
+      if(Date.now()-lastWrite.current<2000) return;
+      const rows=await db().get(roomCode);
+      if(rows.length) setTxs(rows.map(fromDb));
+    };
+    poll();
+    const id=setInterval(poll,3000);
+    return()=>clearInterval(id);
+  },[stage,roomCode]);
+
+  // ── save config ──
+  const saveConfig=async()=>{
+    const u=sbUrl.trim(), k=sbKey.trim();
+    if(!u.includes("supabase.co")||!k) return setError("Please enter your Supabase Project URL and anon key.");
+    dbRef.current=makeDb(u,k);
+    try{ localStorage.setItem(STORAGE_KEY,JSON.stringify({url:u,key:k})); }catch{}
+    setError(""); setStage("room");
+  };
+
+  const resetConfig=()=>{
+    try{ localStorage.removeItem(STORAGE_KEY); }catch{}
+    dbRef.current=null; setSbUrl(""); setSbKey(""); setStage("setup");
+  };
+
+  // ── room management ──
+  const createRoom=()=>{
+    const code=genCode();
+    setRoomCode(code); setTxs([]); setFileName(""); setStage("upload");
+  };
+
+  const joinRoom=async()=>{
+    const code=joinInput.trim().toUpperCase();
+    if(code.length<4) return setError("Enter a valid room code.");
+    setError("");
+    const rows=await db().get(code);
+    setRoomCode(code);
+    setTxs(rows.map(fromDb));
+    setStage("review");
+  };
+
+  // ── file processing ──
+  const enrich=raw=>raw.map(t=>({id:uid(),date:t.date??"",description:t.description??"Unknown",amount:parseFloat(t.amount)||0,category:t.category??"Other",status:"shared",patoShare:gSplit,aiCat:true}));
+
+  const processFile=async(file)=>{
+    setError(""); setFileName(file.name); setStage("loading");
+    try{
+      // step 1: AI extraction
+      let raw;
+      try{ raw=await extractWithAI(file); }
+      catch(e){ throw new Error("AI extraction failed: "+e.message); }
+      if(!raw||!raw.length) throw new Error("No transactions found — try a clearer photo or CSV format.");
+      const enriched=enrich(raw);
+      // step 2: save to Supabase
+      try{
+        lastWrite.current=Date.now();
+        setSyncMsg("syncing");
+        await db().upsert(enriched.map(t=>toDb(t,roomCode)));
+        setSyncMsg("synced"); setTimeout(()=>setSyncMsg(null),2000);
+      } catch(e){ throw new Error("DB save failed: "+e.message); }
+      setTxs(enriched);
+      setStage("review");
+    } catch(e){ setError(e.message||"Upload failed."); setStage("upload"); }
+  };
+
+  const handleFile=f=>{
+    if(!f) return;
+    if(!f.type.startsWith("image/")&&!["application/pdf","text/csv","text/plain"].includes(f.type)&&!f.name.match(/\.(pdf|csv|txt)$/i))
+      return setError("Please upload a PDF, CSV, TXT, or image file.");
+    processFile(f);
+  };
+  const onDrop=useCallback(e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0]);},[roomCode,gSplit]);
+
+  // ── write helpers ──
+  const write=async(fn)=>{ lastWrite.current=Date.now(); setSyncMsg("syncing"); try{ await fn(); setSyncMsg("synced"); setTimeout(()=>setSyncMsg(null),1500); }catch{ setSyncMsg(null); } };
+
+  // ── mutations ──
+  const toggle  = async id => { const next=txs.map(t=>t.id===id?{...t,status:t.status==="shared"?"personal":"shared"}:t); setTxs(next); const t=next.find(x=>x.id===id); await write(()=>db().patch(id,{status:t.status})); };
+  const setShare= async(id,v)=>{ setTxs(ts=>ts.map(t=>t.id===id?{...t,patoShare:v}:t)); await write(()=>db().patch(id,{pato_share:v})); };
+  const setCat  = async(id,cat)=>{ setTxs(ts=>ts.map(t=>t.id===id?{...t,category:cat,aiCat:false}:t)); setCatPick(null); await write(()=>db().patch(id,{category:cat,ai_cat:false})); };
+  const del     = async id  => { setTxs(ts=>ts.filter(t=>t.id!==id)); toast("Deleted","#c0392b"); await write(()=>db().del(id)); };
+  const applyAll= async()   => { const next=txs.map(t=>t.status==="shared"?{...t,patoShare:gSplit}:t); setTxs(next); await write(()=>db().upsert(next.map(t=>toDb(t,roomCode)))); };
+  const markAll = async()   => { const next=txs.map(t=>({...t,status:"shared",patoShare:gSplit})); setTxs(next); await write(()=>db().upsert(next.map(t=>toDb(t,roomCode)))); };
+
+  const openAdd  = ()=>{ setForm({...BLANK,patoShare:gSplit}); setEditId(null); setShowForm(true); setTimeout(()=>formRef.current?.scrollIntoView({behavior:"smooth",block:"start"}),60); };
+  const openEdit = t =>{ setForm({description:t.description,amount:String(t.amount),date:t.date,category:t.category,status:t.status,patoShare:t.patoShare}); setEditId(t.id); setShowForm(true); setTimeout(()=>formRef.current?.scrollIntoView({behavior:"smooth",block:"start"}),60); };
+  const closeForm= ()=>{ setShowForm(false); setEditId(null); };
+  const submit   = async()=>{
+    const amt=parseFloat(form.amount);
+    if(!form.description.trim()||!amt||amt<=0) return;
+    if(editId){
+      const next=txs.map(t=>t.id===editId?{...t,...form,amount:amt,aiCat:false}:t);
+      setTxs(next); toast("Updated");
+      await write(()=>db().upsert(toDb({...txs.find(t=>t.id===editId),...form,amount:amt,aiCat:false},roomCode)));
+    } else {
+      const entry={id:uid(),...form,amount:amt,aiCat:false};
+      setTxs(ts=>[entry,...ts]); toast("Added");
+      await write(()=>db().upsert(toDb(entry,roomCode)));
+    }
+    closeForm();
+  };
+
+  // ── derived ──
+  const shared   = txs.filter(t=>t.status==="shared");
+  const personal = txs.filter(t=>t.status==="personal");
+  const total    = txs.reduce((s,t)=>s+t.amount,0);
+  const shTotal  = shared.reduce((s,t)=>s+t.amount,0);
+  const patoOwes = shared.reduce((s,t)=>s+t.amount*(t.patoShare/100),0);
+  const list     = filter==="shared"?shared:filter==="personal"?personal:txs;
+
+  const shareText = `Join my SplitStatement session!\nRoom code: ${roomCode}\nOpen the app and tap "Join room", then enter: ${roomCode}`;
+
+  // ══ INIT ════════════════════════════════════════════════════════════════════
+  if(stage==="init") return <div style={{...S.root,display:"flex",alignItems:"center",justifyContent:"center"}}><style>{CSS}</style><div style={S.spinner} className="spin"/></div>;
+
+  // ══ SETUP ═══════════════════════════════════════════════════════════════════
+  if(stage==="setup") return (
+    <div style={S.root}><style>{CSS}</style>
+      <div style={S.upWrap}>
+        <div style={S.brand}><span style={S.bMark}>◈</span><div><div style={S.bTitle}>SplitStatement</div><div style={S.bSub}>One-time setup · Takes 2 minutes</div></div></div>
+        <div style={S.setupCard}>
+          <div style={S.setupTitle}>🔗 Connect your Supabase database</div>
+          <div style={S.setupSteps}>
+            {[["1","Go to","supabase.com","→ New project (free)"],["2","SQL Editor","Run the setup SQL","(shown below)"],["3","Settings → API","Copy Project URL","& anon public key"]].map(([n,a,b,c])=>(
+              <div key={n} style={S.setupStep}><span style={S.setupN}>{n}</span><div><b style={{color:"#c8b870"}}>{a}</b> <span style={{color:"#8a8060"}}>{b}</span> <span style={{color:"#5a5848"}}>{c}</span></div></div>
+            ))}
+          </div>
+          <div style={S.sqlBox}>
+            <div style={S.sqlTitle}>SQL to run in Supabase → SQL Editor → New query:</div>
+            <pre style={S.sqlCode}>{`create table transactions (
+  id text primary key,
+  room_code text not null,
+  date text default '',
+  description text default '',
+  amount numeric default 0,
+  category text default 'Other',
+  status text default 'shared',
+  pato_share integer default 50,
+  ai_cat boolean default true,
+  created_at timestamptz default now()
+);
+alter table transactions enable row level security;
+create policy "public_access" on transactions
+  for all to anon using (true) with check (true);`}</pre>
+          </div>
+          <div style={S.fld}>
+            <label style={S.fldLbl}>Supabase Project URL</label>
+            <input style={S.fldIn} placeholder="https://xxxxxxxxxxxx.supabase.co" value={sbUrl} onChange={e=>setSbUrl(e.target.value)}/>
+          </div>
+          <div style={S.fld}>
+            <label style={S.fldLbl}>Anon public key</label>
+            <input style={S.fldIn} placeholder="eyJhbGciOiJIUzI1NiIs..." value={sbKey} onChange={e=>setSbKey(e.target.value)} type="password"/>
+          </div>
+          {error&&<div style={S.errBox}>⚠ {error}</div>}
+          <button style={{...S.btnPrimary,marginTop:14,width:"100%"}} onClick={saveConfig}>Connect & continue →</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ══ ROOM ════════════════════════════════════════════════════════════════════
+  if(stage==="room") return (
+    <div style={S.root}><style>{CSS}</style>
+      <div style={S.upWrap}>
+        <div style={S.brand}><span style={S.bMark}>◈</span><div><div style={S.bTitle}>SplitStatement</div><div style={S.bSub}>Real-time · Enea & Pato</div></div></div>
+        <div style={S.roomGrid}>
+          <div style={S.roomCard}>
+            <div style={S.roomCardTitle}>Start new session</div>
+            <div style={S.roomCardSub}>Upload a statement and share the room code with Pato</div>
+            <button style={{...S.btnPrimary,width:"100%",marginTop:14}} onClick={createRoom}>Create room →</button>
+          </div>
+          <div style={S.roomCard}>
+            <div style={S.roomCardTitle}>Join existing session</div>
+            <div style={S.roomCardSub}>Enter the room code Enea shared with you</div>
+            <input style={{...S.fldIn,marginTop:12,textAlign:"center",fontSize:18,letterSpacing:4,fontWeight:700}} placeholder="ABC123" maxLength={6} value={joinInput} onChange={e=>setJoinInput(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&joinRoom()}/>
+            {error&&<div style={{...S.errBox,marginTop:8}}>⚠ {error}</div>}
+            <button style={{...S.btnGhost,width:"100%",marginTop:10}} onClick={joinRoom}>Join room →</button>
+          </div>
+        </div>
+        <button style={{...S.btnGhost,marginTop:20,fontSize:11,color:"#4a4838"}} onClick={resetConfig}>⚙ Change Supabase settings</button>
+      </div>
+    </div>
+  );
+
+  // ══ UPLOAD ══════════════════════════════════════════════════════════════════
+  if(stage==="upload") return (
+    <div style={S.root}><style>{CSS}</style>
+      <div style={S.upWrap}>
+        <div style={S.brand}><span style={S.bMark}>◈</span><div><div style={S.bTitle}>SplitStatement</div><div style={S.bSub}>Real-time · Enea & Pato</div></div></div>
+        <div style={S.roomBanner}>
+          <div><div style={S.roomBannerLabel}>Room code — share with Pato</div><div style={S.roomBannerCode}>{roomCode}</div></div>
+          <button style={S.shareBtn} onClick={()=>{ if(navigator.share){navigator.share({title:"SplitStatement",text:shareText}).catch(()=>{})} else { navigator.clipboard?.writeText(roomCode); toast("Code copied!"); } }}>Share 📤</button>
+        </div>
+        <div style={{...S.drop,...(drag?S.dropOn:{})}} onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={onDrop} onClick={()=>fileRef.current.click()}>
+          <input ref={fileRef} type="file" accept=".pdf,.csv,.txt,.jpg,.jpeg,.png,.heic,.heif,.webp" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+          <div style={S.upIcon}>⬆</div>
+          <div style={S.upTitle}>Drop your statement here</div>
+          <div style={S.upSub}>PDF · CSV · TXT · or a photo of your statement</div>
+          <div style={S.upBtn}>Choose file</div>
+        </div>
+        {error&&<div style={S.errBox}>⚠ {error}</div>}
+        <div style={S.orRow}><span style={S.orLine}/><span style={S.orTxt}>or</span><span style={S.orLine}/></div>
+        <button style={S.manualBtn} onClick={()=>setStage("review")}>Start with manual entries</button>
+      </div>
+    </div>
+  );
+
+  // ══ LOADING ══════════════════════════════════════════════════════════════════
+  if(stage==="loading") return (
+    <div style={{...S.root,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:18}}>
+      <style>{CSS}</style>
+      <div style={S.spinner} className="spin"/>
+      <div style={{color:"#c8b870",fontSize:16,fontFamily:"Georgia,serif"}}>Extracting transactions…</div>
+      <div style={{color:"#5a5848",fontSize:13}}>{fileName}</div>
+    </div>
+  );
+
+  // ══ REVIEW ══════════════════════════════════════════════════════════════════
+  return (
+    <div style={S.root}><style>{CSS}</style>
+      {flash&&<div style={{...S.flash,background:flash.color}}>{flash.msg}</div>}
+
+      {/* header */}
+      <div style={S.hdr}>
+        <div style={S.hdrL}>
+          <span style={S.hdrMark}>◈</span>
+          <div>
+            <div style={S.hdrFile}>{fileName||"Session"} <span style={S.roomPill}>{roomCode}</span></div>
+            <div style={S.hdrCount}>{txs.length} transactions {syncMsg&&<span style={{color:syncMsg==="syncing"?"#a78b2f":"#4ade80",marginLeft:4}}>{syncMsg==="syncing"?"↑ syncing…":"✓ synced"}</span>}</div>
+          </div>
+        </div>
+        <div style={S.hdrR}>
+          <div>
+            <div style={S.hdrBalLbl}>Pato owes</div>
+            <div style={S.hdrBalAmt}>{CHF(patoOwes)}</div>
+          </div>
+          <button style={S.newBtn} onClick={()=>setStage("room")}>↩</button>
+        </div>
+      </div>
+
+      {/* share banner */}
+      <div style={S.shareBanner}>
+        <span style={S.shareBannerTxt}>👥 Share room code with Pato: <b style={{color:"#e8c84a",letterSpacing:2}}>{roomCode}</b></span>
+        <button style={S.shareSmBtn} onClick={()=>{ if(navigator.share){navigator.share({text:shareText}).catch(()=>{})} else { navigator.clipboard?.writeText(roomCode); toast("Copied!"); } }}>Share 📤</button>
+      </div>
+
+      {/* tabs */}
+      <div style={S.tabBar}>
+        {[["transactions","Transactions"],["stats","Statistics"]].map(([v,l])=>(
+          <button key={v} style={{...S.tabBtn,...(tab===v?S.tabBtnOn:{})}} onClick={()=>setTab(v)}>{l}</button>
+        ))}
+      </div>
+
+      {tab==="stats"&&<StatsView txs={txs}/>}
+
+      {tab==="transactions"&&<>
+        {/* toolbar */}
+        <div style={S.toolbar}>
+          <div style={S.tbGroup}>
+            <div style={S.tbLabel}>Pato's default share</div>
+            <div style={S.tbRow}>
+              {[25,50,75].map(v=><button key={v} style={{...S.pill,...(gSplit===v?S.pillOn:{})}} onClick={()=>setGSplit(v)}>{v}%</button>)}
+              <input type="number" min="0" max="100" style={S.numIn} value={gSplit} onChange={e=>setGSplit(Math.max(0,Math.min(100,+e.target.value)))}/>
+              <span style={{color:"#5a5848",fontSize:12}}>%</span>
+              <button style={S.applyBtn} onClick={applyAll}>Apply</button>
+            </div>
+          </div>
+          <div style={S.tbGroup}>
+            <div style={S.tbLabel}>Actions</div>
+            <div style={S.tbRow}>
+              <button style={S.pill} onClick={markAll}>All shared</button>
+              <button style={{...S.pill,...S.pillGreen}} onClick={openAdd}>＋ Add</button>
+              <button style={S.pill} onClick={()=>setStage("upload")}>Upload more</button>
+            </div>
+          </div>
+          <div style={S.tbGroup}>
+            <div style={S.tbLabel}>Show</div>
+            <div style={S.tbRow}>
+              {[["all",`All·${txs.length}`],["shared",`Shared·${shared.length}`],["personal",`Personal·${personal.length}`]].map(([v,l])=>(
+                <button key={v} style={{...S.pill,...(filter===v?S.pillOn:{})}} onClick={()=>setFilter(v)}>{l}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* add/edit form */}
+        {showForm&&(
+          <div ref={formRef} style={S.formCard}>
+            <div style={S.formTitle}>{editId?"✏️ Edit entry":"＋ New entry"}</div>
+            <div style={S.formRow}>
+              <div style={{...S.fld,flex:2,minWidth:0}}><label style={S.fldLbl}>Description</label><input style={S.fldIn} placeholder="e.g. Migros Lausanne" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&submit()}/></div>
+              <div style={S.fld}><label style={S.fldLbl}>Amount CHF</label><input style={S.fldIn} type="number" min="0" step="0.01" placeholder="0.00" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&submit()}/></div>
+              <div style={S.fld}><label style={S.fldLbl}>Date</label><input style={S.fldIn} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
+            </div>
+            <div style={S.fld}><label style={S.fldLbl}>Category</label><div style={S.catWrap}>{CATEGORIES.map(c=><button key={c} style={{...S.catBtn,...(form.category===c?S.catOn:{})}} onClick={()=>setForm(f=>({...f,category:c}))}>{CE[c]} {c}</button>)}</div></div>
+            <div style={S.formRow}>
+              <div style={S.fld}><label style={S.fldLbl}>Status</label><div style={S.seg}>{["shared","personal"].map(sv=><button key={sv} style={{...S.segBtn,...(form.status===sv?S.segOn:{})}} onClick={()=>setForm(f=>({...f,status:sv}))}>{sv==="shared"?"Shared":"Personal"}</button>)}</div></div>
+              {form.status==="shared"&&<div style={{...S.fld,flex:2}}><label style={S.fldLbl}>Pato's share — {form.patoShare}%</label><div style={S.sliderRow}><input type="range" min="0" max="100" step="5" className="sslider" style={{flex:1}} value={form.patoShare} onChange={e=>setForm(f=>({...f,patoShare:+e.target.value}))}/><div style={S.presetRow}>{[0,25,50,75,100].map(v=><button key={v} style={{...S.pBtn,...(form.patoShare===v?S.pBtnOn:{})}} onClick={()=>setForm(f=>({...f,patoShare:v}))}>{v}%</button>)}</div></div></div>}
+            </div>
+            <div style={{display:"flex",gap:8,marginTop:14}}>
+              <button style={S.btnPrimary} onClick={submit}>{editId?"Save":"Add entry"}</button>
+              <button style={S.btnGhost} onClick={closeForm}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* list */}
+        <div style={S.list}>
+          {list.length===0&&<div style={S.empty}>No entries here. <button style={{...S.btnGhost,padding:"5px 14px",fontSize:12}} onClick={openAdd}>＋ Add one</button></div>}
+          {list.map(t=>(
+            <div key={t.id} style={{...S.card,...(t.status==="personal"?S.cardFaded:{})}} className="card">
+              <div style={S.cardTop}>
+                <button style={{...S.badge,...(t.status==="shared"?S.badgeShared:S.badgePersonal)}} onClick={()=>toggle(t.id)}>{t.status==="shared"?"SHARED":"PERSONAL"}</button>
+                <div style={S.cardDesc}>{t.description}</div>
+                <div style={S.cardAmt}><div style={S.amtMain}>{CHF(t.amount)}</div>{t.status==="shared"&&<div style={S.amtPato}>pato {CHF(t.amount*t.patoShare/100)}</div>}</div>
+                <div style={S.cardActions} className="cactions">
+                  <button style={S.iconBtn} onClick={()=>openEdit(t)}>✏️</button>
+                  <button style={{...S.iconBtn,color:"#f08080"}} onClick={()=>del(t.id)}>🗑</button>
+                </div>
+              </div>
+              <div style={S.cardBot}>
+                <button style={{...S.chip,...(t.aiCat?S.chipAI:{})}} onClick={()=>setCatPick(catPick===t.id?null:t.id)}>
+                  {CE[t.category]} {t.category}{t.aiCat&&<span style={S.aiDot} title="AI suggestion">✦</span>}
+                </button>
+                {catPick===t.id&&(
+                  <div style={S.catPicker}>
+                    {CATEGORIES.map(c=><button key={c} style={{...S.catPickBtn,...(t.category===c?S.catPickOn:{})}} onClick={()=>setCat(t.id,c)}>{CE[c]} {c}</button>)}
+                  </div>
+                )}
+                <span style={S.dateChip}>{t.date}</span>
+                {t.status==="shared"&&(
+                  <div style={S.inlineSlider}>
+                    <input type="range" min="0" max="100" step="5" className="sslider" style={{width:80}} value={t.patoShare} onChange={e=>setShare(t.id,+e.target.value)}/>
+                    <span style={S.pctLbl}>{t.patoShare}%</span>
+                    <div style={S.inlinePresets}>{[0,25,50,75,100].map(v=><button key={v} style={{...S.pBtn,...(t.patoShare===v?S.pBtnOn:{})}} onClick={()=>setShare(t.id,v)}>{v}%</button>)}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* summary */}
+        <div style={S.summary}>
+          <div style={S.sumTitle}>◈ Summary</div>
+          <div style={S.sumGrid}>
+            {[["Total","",total],["Shared",`${shared.length} items`,shTotal],["Personal",`${personal.length} items`,personal.reduce((s,t)=>s+t.amount,0)],["Enea keeps","his share",shTotal-patoOwes]].map(([l,sb,v])=>(
+              <div key={l} style={S.sumCard}><div style={S.sumLbl}>{l}</div><div style={S.sumVal}>{CHF(v)}</div>{sb&&<div style={S.sumSub}>{sb}</div>}</div>
+            ))}
+            <div style={{...S.sumCard,...S.sumHi}}><div style={S.sumLbl}>Pato owes Enea</div><div style={{...S.sumVal,color:"#4ade80",fontSize:22}}>{CHF(patoOwes)}</div><div style={S.sumSub}>her share of shared costs</div></div>
+          </div>
+        </div>
+      </>}
+    </div>
+  );
+}
+
+// ─── CSS ──────────────────────────────────────────────────────────────────────
+const CSS=`
+  *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+  html, body { overflow-x:hidden; background:#0d0c0a; }
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; }
+  input:focus { outline:none !important; border-color:#a78b2f !important; }
+  button { cursor:pointer; border:none; font-family:inherit; background:none; }
+  .card:hover { background:#1a1812 !important; }
+  .card:hover .cactions { opacity:1 !important; }
+  .spin { animation:spin .9s linear infinite; }
+  @keyframes spin { to{transform:rotate(360deg);} }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);} }
+  @keyframes flashIn { from{opacity:0;transform:translateX(-50%) translateY(-8px);}to{opacity:1;transform:translateX(-50%) translateY(0);} }
+  @keyframes slideDown { from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);} }
+  .card { animation:fadeUp .18s ease both; }
+  input[type=range].sslider { -webkit-appearance:none; height:3px; border-radius:2px; background:linear-gradient(to right,#a78b2f,#2a2820); outline:none; }
+  input[type=range].sslider::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#e8c84a; cursor:pointer; border:2px solid #0d0c0a; }
+  pre { white-space:pre-wrap; word-break:break-all; }
+`;
+
+const S={
+  root:     { background:"#0d0c0a", minHeight:"100vh", fontFamily:"'Trebuchet MS',Georgia,serif", color:"#e0ddd5", overflowX:"hidden" },
+  flash:    { position:"fixed", top:16, left:"50%", transform:"translateX(-50%)", color:"#fff", padding:"8px 20px", borderRadius:6, fontSize:13, zIndex:999, fontWeight:700, boxShadow:"0 4px 18px rgba(0,0,0,.5)", animation:"flashIn .2s ease", whiteSpace:"nowrap" },
+  spinner:  { width:38, height:38, border:"3px solid #2a2820", borderTopColor:"#a78b2f", borderRadius:"50%" },
+  upWrap:   { maxWidth:520, margin:"0 auto", padding:"40px 16px 60px" },
+  brand:    { display:"flex", alignItems:"center", gap:12, marginBottom:28 },
+  bMark:    { fontSize:32, color:"#a78b2f", flexShrink:0 },
+  bTitle:   { fontSize:22, fontWeight:700, color:"#e8c84a", fontFamily:"Georgia,serif", letterSpacing:.8 },
+  bSub:     { fontSize:11, color:"#6a6050", letterSpacing:1.4, textTransform:"uppercase", marginTop:1 },
+  // setup
+  setupCard:  { background:"#141210", border:"1px solid #2a2820", borderRadius:12, padding:"20px" },
+  setupTitle: { fontSize:14, fontWeight:700, color:"#c8b060", marginBottom:14 },
+  setupSteps: { display:"flex", flexDirection:"column", gap:8, marginBottom:16 },
+  setupStep:  { display:"flex", gap:10, alignItems:"flex-start" },
+  setupN:     { background:"#a78b2f", color:"#0d0c0a", fontSize:10, fontWeight:800, width:18, height:18, borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, marginTop:1 },
+  sqlBox:     { background:"#0d0c0a", border:"1px solid #1e1c16", borderRadius:8, padding:"12px", marginBottom:14 },
+  sqlTitle:   { fontSize:10, color:"#6a6050", marginBottom:8, textTransform:"uppercase", letterSpacing:.8 },
+  sqlCode:    { fontSize:11, color:"#8a9a6a", lineHeight:1.6, fontFamily:"monospace" },
+  // room
+  roomGrid:   { display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 },
+  roomCard:   { background:"#141210", border:"1px solid #2a2820", borderRadius:12, padding:"18px 16px" },
+  roomCardTitle: { fontSize:14, fontWeight:700, color:"#c8b060", marginBottom:6 },
+  roomCardSub:   { fontSize:12, color:"#5a5848", lineHeight:1.5 },
+  roomBanner: { background:"#1a1810", border:"1px solid #2a2820", borderRadius:10, padding:"12px 14px", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center" },
+  roomBannerLabel: { fontSize:10, color:"#6a6050", textTransform:"uppercase", letterSpacing:1, marginBottom:3 },
+  roomBannerCode:  { fontSize:24, fontWeight:800, color:"#e8c84a", letterSpacing:4, fontFamily:"monospace" },
+  shareBtn:   { background:"linear-gradient(135deg,#a78b2f,#c8a840)", color:"#0d0c0a", fontWeight:700, fontSize:12, padding:"8px 14px", borderRadius:7 },
+  drop:     { border:"2px dashed #2a2820", borderRadius:14, padding:"40px 24px", textAlign:"center", cursor:"pointer", transition:"all .2s", background:"#111008" },
+  dropOn:   { border:"2px dashed #a78b2f", background:"#1a1510" },
+  upIcon:   { fontSize:28, color:"#a78b2f", marginBottom:10 },
+  upTitle:  { fontSize:17, color:"#d8c87a", fontWeight:700, marginBottom:5 },
+  upSub:    { fontSize:12, color:"#5a5848", marginBottom:18 },
+  upBtn:    { display:"inline-block", background:"linear-gradient(135deg,#a78b2f,#c8a840)", color:"#0d0c0a", fontWeight:700, fontSize:13, padding:"8px 20px", borderRadius:7 },
+  errBox:   { marginTop:12, background:"#2a1010", border:"1px solid #5a2020", borderRadius:8, padding:"9px 12px", color:"#f08080", fontSize:13 },
+  orRow:    { display:"flex", alignItems:"center", gap:10, margin:"18px 0 14px" },
+  orLine:   { flex:1, height:1, background:"#1e1c16" },
+  orTxt:    { fontSize:12, color:"#3a3828" },
+  manualBtn:{ display:"block", width:"100%", border:"1px solid #2a2820", color:"#6a6050", fontSize:13, padding:"10px", borderRadius:8, textAlign:"center" },
+  // header
+  hdr:      { position:"sticky", top:0, zIndex:50, background:"#0d0c0a", borderBottom:"1px solid #1e1c16", display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 14px" },
+  hdrL:     { display:"flex", alignItems:"center", gap:10, minWidth:0 },
+  hdrMark:  { fontSize:18, color:"#a78b2f", flexShrink:0 },
+  hdrFile:  { fontSize:12, color:"#8a8060", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"45vw" },
+  hdrCount: { fontSize:10, color:"#4a4838" },
+  hdrR:     { display:"flex", alignItems:"center", gap:10, flexShrink:0 },
+  hdrBalLbl:{ fontSize:9, color:"#6a6050", textTransform:"uppercase", letterSpacing:1, textAlign:"right" },
+  hdrBalAmt:{ fontSize:17, fontWeight:700, color:"#4ade80", fontFamily:"Georgia,serif" },
+  newBtn:   { background:"#1a1810", border:"1px solid #2a2820", color:"#8a8060", fontSize:13, padding:"6px 12px", borderRadius:6 },
+  roomPill: { background:"#2a2210", border:"1px solid #a78b2f", color:"#e8c84a", fontSize:9, fontWeight:700, padding:"1px 6px", borderRadius:10, letterSpacing:1.5, marginLeft:6 },
+  shareBanner:{ background:"#151310", borderBottom:"1px solid #1e1c16", padding:"7px 14px", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 },
+  shareBannerTxt:{ fontSize:12, color:"#6a6050" },
+  shareSmBtn: { background:"#1a2a18", border:"1px solid #2a4a22", color:"#4ade80", fontSize:11, fontWeight:700, padding:"4px 10px", borderRadius:6, flexShrink:0 },
+  // tabs + toolbar
+  tabBar:   { display:"flex", borderBottom:"1px solid #1e1c16", background:"#0d0c0a" },
+  tabBtn:   { flex:1, color:"#5a5848", fontSize:13, fontWeight:600, padding:"11px 0", borderBottom:"2px solid transparent", letterSpacing:.3 },
+  tabBtnOn: { color:"#e8c84a", borderBottomColor:"#a78b2f" },
+  toolbar:  { background:"#0f0e0b", borderBottom:"1px solid #1a1812", padding:"10px 14px", display:"flex", flexDirection:"column", gap:10 },
+  tbGroup:  { display:"flex", flexWrap:"wrap", alignItems:"center", gap:6 },
+  tbLabel:  { fontSize:10, color:"#4a4838", textTransform:"uppercase", letterSpacing:1, minWidth:90 },
+  tbRow:    { display:"flex", flexWrap:"wrap", gap:5, alignItems:"center" },
+  pill:     { background:"#1a1810", border:"1px solid #2a2820", color:"#7a7060", fontSize:11, padding:"4px 10px", borderRadius:20, fontWeight:600 },
+  pillOn:   { background:"#2a2210", border:"1px solid #a78b2f", color:"#e8c84a" },
+  pillGreen:{ background:"#1a2a18", border:"1px solid #2a4a22", color:"#4ade80", fontWeight:700 },
+  numIn:    { background:"#1a1810", border:"1px solid #2a2820", color:"#e0ddd5", width:40, textAlign:"center", padding:"4px 5px", borderRadius:5, fontSize:12 },
+  applyBtn: { background:"none", border:"1px solid #2a2820", color:"#7a7060", fontSize:11, padding:"4px 10px", borderRadius:5 },
+  // form
+  formCard: { background:"#111008", border:"1px solid #2a2820", borderLeft:"3px solid #a78b2f", margin:"10px 14px", borderRadius:10, padding:"14px", animation:"slideDown .2s ease" },
+  formTitle:{ fontSize:13, color:"#c8b060", fontWeight:700, marginBottom:12 },
+  formRow:  { display:"flex", flexWrap:"wrap", gap:10, marginBottom:10 },
+  fld:      { display:"flex", flexDirection:"column", gap:4, flex:1, minWidth:110 },
+  fldLbl:   { fontSize:10, color:"#6a6050", textTransform:"uppercase", letterSpacing:.9 },
+  fldIn:    { background:"#1a1810", border:"1px solid #2a2820", borderRadius:6, color:"#e0ddd5", fontSize:13, padding:"7px 9px" },
+  catWrap:  { display:"flex", flexWrap:"wrap", gap:5, marginBottom:4 },
+  catBtn:   { background:"#1a1810", border:"1px solid #2a2820", borderRadius:5, color:"#7a7060", fontSize:11, padding:"4px 8px" },
+  catOn:    { background:"#2a2210", border:"1px solid #a78b2f", color:"#e8c84a" },
+  seg:      { display:"flex", background:"#1a1810", border:"1px solid #2a2820", borderRadius:6, overflow:"hidden" },
+  segBtn:   { flex:1, color:"#7a7060", fontSize:12, padding:"7px 0", fontWeight:600 },
+  segOn:    { background:"#a78b2f", color:"#fff" },
+  sliderRow:{ display:"flex", flexWrap:"wrap", alignItems:"center", gap:8, marginTop:2 },
+  presetRow:{ display:"flex", gap:4 },
+  pBtn:     { background:"none", border:"1px solid #1e1c16", color:"#4a4838", fontSize:9, padding:"2px 5px", borderRadius:4, fontWeight:600 },
+  pBtnOn:   { border:"1px solid #a78b2f", color:"#e8c84a", background:"#1e1a0a" },
+  btnPrimary:{ background:"linear-gradient(135deg,#a78b2f,#c8a840)", color:"#0d0c0a", fontWeight:700, fontSize:13, padding:"8px 20px", borderRadius:7 },
+  btnGhost: { border:"1px solid #2a2820", color:"#7a7060", fontSize:13, padding:"8px 14px", borderRadius:7 },
+  // list
+  list:     { padding:"8px 14px 16px", display:"flex", flexDirection:"column", gap:6 },
+  empty:    { display:"flex", alignItems:"center", justifyContent:"center", gap:12, color:"#4a4838", padding:"36px 0", fontSize:13 },
+  card:     { background:"#141210", border:"1px solid #1e1c16", borderRadius:10, padding:"10px 12px", transition:"background .15s" },
+  cardFaded:{ opacity:.4 },
+  cardTop:  { display:"flex", alignItems:"center", gap:8, marginBottom:6 },
+  badge:    { fontSize:9, fontWeight:800, padding:"3px 8px", borderRadius:20, letterSpacing:.7, whiteSpace:"nowrap", flexShrink:0 },
+  badgeShared:  { background:"#1a2e18", color:"#4ade80", border:"1px solid #2a4a28" },
+  badgePersonal:{ background:"#2a1010", color:"#f08080", border:"1px solid #4a2020" },
+  cardDesc: { flex:1, fontSize:13, color:"#d0cdc4", fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  cardAmt:  { textAlign:"right", flexShrink:0 },
+  amtMain:  { fontSize:14, fontWeight:700, color:"#c8b870" },
+  amtPato:  { fontSize:10, color:"#5a9050" },
+  cardActions:{ display:"flex", gap:2, flexShrink:0, opacity:0, transition:"opacity .15s" },
+  iconBtn:  { fontSize:13, padding:"2px 4px", borderRadius:4 },
+  cardBot:  { display:"flex", flexWrap:"wrap", alignItems:"center", gap:6 },
+  chip:     { fontSize:10, color:"#6a6050", background:"#1a1810", padding:"2px 7px", borderRadius:10, border:"1px solid transparent", cursor:"pointer", fontFamily:"inherit" },
+  chipAI:   { border:"1px solid #3a3a50", color:"#a0a0c8", background:"#18182a" },
+  aiDot:    { marginLeft:4, fontSize:8, color:"#7878c8", verticalAlign:"super" },
+  catPicker:{ display:"flex", flexWrap:"wrap", gap:5, padding:"8px 10px", background:"#18160e", border:"1px solid #2a2820", borderRadius:8, marginTop:4, width:"100%", animation:"slideDown .15s ease" },
+  catPickBtn:{ background:"#1a1810", border:"1px solid #2a2820", borderRadius:5, color:"#7a7060", fontSize:11, padding:"4px 8px" },
+  catPickOn: { background:"#2a2210", border:"1px solid #a78b2f", color:"#e8c84a" },
+  dateChip: { fontSize:10, color:"#4a4838" },
+  inlineSlider:{ display:"flex", flexWrap:"wrap", alignItems:"center", gap:6, marginLeft:"auto" },
+  pctLbl:   { fontSize:11, color:"#c8b870", fontWeight:700, minWidth:28 },
+  inlinePresets:{ display:"flex", gap:3 },
+  // summary
+  summary:  { background:"#0f0e0b", borderTop:"1px solid #1e1c16", padding:"20px 14px 40px" },
+  sumTitle: { fontSize:11, color:"#a78b2f", letterSpacing:1.5, textTransform:"uppercase", marginBottom:14 },
+  sumGrid:  { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))", gap:8 },
+  sumCard:  { background:"#141210", border:"1px solid #1e1c16", borderRadius:10, padding:"12px 14px" },
+  sumHi:    { border:"1px solid #2a4a28", background:"#101810", gridColumn:"1 / -1" },
+  sumLbl:   { fontSize:10, color:"#5a5848", textTransform:"uppercase", letterSpacing:.8, marginBottom:4 },
+  sumVal:   { fontSize:18, fontWeight:700, fontFamily:"Georgia,serif", color:"#c8b870" },
+  sumSub:   { fontSize:10, color:"#4a4838", marginTop:3 },
+};
+
+const SS={
+  kpiRow:   { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(120px,1fr))", gap:8, marginBottom:12 },
+  kpi:      { background:"#141210", border:"1px solid #1e1c16", borderRadius:10, padding:"12px 14px" },
+  kpiLbl:   { fontSize:10, color:"#5a5848", textTransform:"uppercase", letterSpacing:.8, marginBottom:4 },
+  kpiVal:   { fontSize:16, fontWeight:700, fontFamily:"Georgia,serif", color:"#c8b870" },
+  kpiSub:   { fontSize:10, color:"#4a4838", marginTop:2 },
+  chartCard:{ background:"#141210", border:"1px solid #1e1c16", borderRadius:10, padding:"14px", marginBottom:10 },
+  chartTitle:{ fontSize:11, color:"#a78b2f", textTransform:"uppercase", letterSpacing:1.2, marginBottom:14 },
+  mRow:     { display:"flex", alignItems:"center", gap:8, padding:"6px 0", borderBottom:"1px solid #1a1812" },
+  mRank:    { fontSize:10, color:"#4a4838", minWidth:14, textAlign:"right" },
+  mName:    { fontSize:12, color:"#c0bdb4", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  mBarW:    { width:80, height:4, background:"#1e1c16", borderRadius:2, overflow:"hidden" },
+  mBar:     { height:"100%", background:"linear-gradient(90deg,#a78b2f,#e8c84a)", borderRadius:2 },
+  mAmt:     { fontSize:12, fontWeight:700, color:"#c8b870", minWidth:70, textAlign:"right" },
+  mCnt:     { fontSize:10, color:"#4a4838", minWidth:24, textAlign:"right" },
+};
+
+const domRoot = ReactDOM.createRoot(document.getElementById('root'));
+domRoot.render(React.createElement(App));
+  </script>
 </body>
 </html>
