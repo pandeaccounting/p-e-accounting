@@ -3,21 +3,18 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>SplitStatement · Enea & Pato</title>
+  <title>SplitStatement</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { background: #0d0c0a; min-height: 100vh; }
-  </style>
+  <style>* { box-sizing:border-box; margin:0; padding:0; } html,body { background:#0d0c0a; min-height:100vh; }</style>
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel" data-type="module">
+  <script type="text/babel">
 const { useState, useRef, useCallback, useEffect } = React;
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell, LineChart, Line, CartesianGrid } from "recharts";
+const { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell, LineChart, Line, CartesianGrid } = Recharts;
 
 // ─── Supabase REST client (no SDK needed) ────────────────────────────────────
 const SB_URL = "https://exkkjdwcxwltm.supabase.co";
@@ -725,8 +722,7 @@ const SS={
   mCnt:     { fontSize:10, color:"#4a4838", minWidth:24, textAlign:"right" },
 };
 
-const domRoot = ReactDOM.createRoot(document.getElementById('root'));
-domRoot.render(React.createElement(App));
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
   </script>
 </body>
 </html>
